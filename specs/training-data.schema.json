@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "role": { "type": "string", "enum": ["system", "user", "assistant"] },
+          "content": { "type": "string" }
+        },
+        "required": ["role", "content"]
+      },
+      "minItems": 2
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "sourceChunkIds": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "groundingScore": { "type": "number", "minimum": 0, "maximum": 1 },
+        "generatedBy": { "type": "string" }
+      },
+      "required": ["sourceChunkIds", "groundingScore", "generatedBy"]
+    }
+  },
+  "required": ["messages", "meta"]
+}

@@ -1,0 +1,15 @@
+# Training artifacts (not committed — too large / private)
+training_data.jsonl
+training_data_drag.jsonl
+knowledge_triples.json
+checkpoint/
+checkpoint.zip
+onnx-export/
+public/data/knowledge_chunks.json
+public/data/company_chunks.json
+*.onnx
+*.bin
+*.safetensors
+__pycache__/
+*.pyc
+.env*
