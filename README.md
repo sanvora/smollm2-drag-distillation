@@ -1,10 +1,11 @@
 # SmolLM2-360M — DRAG Fine-Tuning Pipeline
 
-> A reproducible pipeline for fine-tuning a 360M-parameter language model on
-> structured knowledge using **DRAG** (Distilled Retrieval-Augmented Generation).
->
-> The resulting model runs entirely **in the browser** via
-> [Transformers.js](https://huggingface.co/docs/transformers.js) — no server required.
+> A reproducible pipeline for fine-tuning a 360M-parameter language model to answer
+> questions grounded in retrieved evidence — running entirely **in the browser** via
+> [Transformers.js](https://huggingface.co/docs/transformers.js). No server required.
+
+This repo documents three iterations of training, each addressing a failure discovered
+in the previous run. The engineering decisions and diagnostics are the point.
 
 ---
 
@@ -13,31 +14,97 @@
 **DRAG** (Distilled Retrieval-Augmented Generation) trains a small model to answer
 questions grounded in retrieved evidence — not from memorized facts.
 
-Standard SFT trains on simple question → answer pairs. The model memorizes answers
-and hallucinates when asked anything outside its training set.
+At inference time, the top retrieved chunk is injected into the system prompt. The
+model is trained to read that evidence and answer from it, not to hallucinate from
+pretraining knowledge.
 
-DRAG fixes this by:
+---
 
-1. Using a **large teacher model** (Llama 3.3 70B via Groq) to generate high-quality,
-   grounded answers from retrieved evidence chunks
-2. Training the student on the **full context** — system prompt with evidence,
-   user question, and teacher-generated answer
-3. Using **completion-only loss** so the model learns to *read and answer from evidence*,
-   not memorize the prompt
+## Iteration History
 
-The result is a model that generalizes: given the right evidence at inference time,
-it can answer questions it has never seen before.
+### v1 — Full SFT, bare Q&A pairs (`colab_kd.ipynb`)
 
-### SFT vs DRAG — key differences
+**Training data:** ~100 simple `user → assistant` pairs, no system message, no evidence.  
+**Result:** Model hallucinated confidently. Invented fake employers and job titles.  
+**Root cause:** At inference the model receives `system: [evidence chunk]` — a format
+it never saw during training. It ignored the evidence entirely.
 
-| | SFT | DRAG |
-|---|---|---|
-| Training signal | Answer pairs only | Teacher answer grounded in evidence |
-| Input format | `user: Q` → `assistant: A` | `system: [evidence]` → `user: Q` → `assistant: A` |
-| Loss masking | Full sequence | Completion-only (prompt tokens masked) |
-| Generalisation | Memorizes Q→A | Learns to extract + reason from context |
-| Hallucination risk | Medium–High | Low (grounded in retrieved context) |
-| Data required | ~100 pairs | ~400+ pairs (higher quality via teacher) |
+---
+
+### v2 — Full SFT, RAG-augmented format
+
+**Training data:** 339 examples regenerated with the exact `system+evidence+user+assistant`
+format that matches inference. Evidence truncated to 400 chars — same as inference.  
+**Result:** RAG-grounded responses improved significantly. But off-topic questions
+(e.g. "leadership skills") produced confident hallucinations with invented names.  
+**Root cause:** Two problems from full fine-tuning on a small dataset:
+
+1. **Catastrophic forgetting of DPO behavior.** SmolLM2-360M-Instruct was post-trained
+   with Direct Preference Optimization (DPO) to prefer cautious, grounded answers.
+   Full SFT on 339 examples overwrote those weights. The model unlearned "I don't know."
+2. **Context window regression.** Training at `max_length=768` degraded attention
+   patterns beyond that range. The base model supports 8192 tokens; this run broke that.
+
+Best val loss: **0.604** at epoch 9 (16 epochs, `load_best_model_at_end=True`).
+
+---
+
+### v3 — LoRA SFT, RAG-augmented format (`colab_sft.ipynb`) ← current
+
+**Key insight:** We don't need to change *how the model behaves* — only *what it knows*.
+LoRA freezes 99% of the model's weights (including DPO-tuned layers) and trains only
+~3.5M low-rank adapter parameters.
+
+**Changes from v2:**
+- `peft` LoRA: `r=16`, `alpha=32`, all attention + MLP projections targeted
+- `max_length=2048` — safe on T4; preserves base model's attention range
+- `learning_rate=1e-4` — LoRA adapters start from zero and need a higher rate
+- `merge_and_unload()` before saving — collapses adapters into base weights for ONNX export
+
+**Result:** DPO refusal behavior preserved. Bare prompts produce generic but
+non-fabricated responses. RAG-grounded responses stay anchored to the evidence.
+
+```
+Epoch  Training Loss  Validation Loss
+9      1.516954       1.491365
+15     0.597164       0.741425
+20     0.487317       0.697417
+23     0.486048       0.693020  ← best (load_best_model_at_end)
+24     0.475421       0.693383
+25     0.471588       0.693433
+```
+
+Best val loss: **0.693** at epoch 23 (25 epochs).
+
+> The higher floor vs v2 (0.693 vs 0.604) is expected — LoRA has less expressivity
+> than full fine-tuning. The tradeoff is intentional: better behavior over lower loss.
+
+---
+
+## Training Data Format
+
+Each example uses the exact same format as inference:
+
+```json
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a helpful assistant for Kham's portfolio. Be concise and accurate.\nAnswer using ONLY these facts:\n1. {evidence chunk, ≤400 chars}"
+    },
+    { "role": "user",      "content": "Question?" },
+    { "role": "assistant", "content": "Grounded answer." }
+  ],
+  "meta": {
+    "sourceChunkIds": ["chunk-001"],
+    "groundingScore": 0.94,
+    "ragMode": true
+  }
+}
+```
+
+The system prompt wording and evidence format match inference exactly — this
+train/inference alignment is what makes RAG grounding work.
 
 ---
 
@@ -45,21 +112,15 @@ it can answer questions it has never seen before.
 
 ```mermaid
 flowchart TD
-    A[Knowledge chunks\nplaintext JSON] --> B[gen-graph-triples.mjs\nextract KG triples via LLM]
-    A --> C[gen-training-data.mjs\nSFT Q&A pairs via teacher LLM]
-    B --> D[knowledge_triples.json]
-    C --> E[training_data.jsonl\n~100 SFT pairs]
-    D --> F[gen-drag-data.mjs\nDRAG pairs: evidence + triples + teacher answer]
-    A --> F
-    F --> G[training_data_drag.jsonl\n~400 DRAG pairs]
-    E --> H{Combine datasets}
-    G --> H
-    H --> I[colab_kd.ipynb\nDirect SFT on T4 GPU\n8 epochs · completion-only loss]
-    I --> J[Best checkpoint\nauto-selected by eval loss]
-    J --> K[export_onnx.py\nONNX fp32 export]
-    K --> L[quantize_onnx.py\nONNXRuntime → int8]
-    L --> M[HuggingFace Hub\nONNX int8 model]
-    M --> N[Browser inference\nTransformers.js + ONNX Runtime Web]
+    A[Knowledge chunks\nJSON] --> C[gen-training-data.mjs --rag\nRAG-augmented Q&A via teacher LLM]
+    C --> E[training_data_rag.jsonl\n339 examples]
+    E --> I[colab_sft.ipynb\nLoRA SFT · r=16 · T4 GPU · 25 epochs]
+    I --> J[Best checkpoint\nauto-selected by eval_loss]
+    J --> K[merge_and_unload\nLoRA → plain AutoModelForCausalLM]
+    K --> L[ONNX export\nfp32 · opset 18]
+    L --> M[quantize_onnx.py\nQInt8 · MatMul-only · WASM-compatible]
+    M --> N[HuggingFace Hub\nONNX int8 · ~500MB]
+    N --> O[Browser inference\nTransformers.js + ONNX Runtime Web]
 ```
 
 ---
@@ -68,155 +129,106 @@ flowchart TD
 
 ```
 ├── scripts/
-│   ├── gen-training-data.mjs   # Generate SFT Q&A pairs (teacher LLM)
-│   ├── gen-graph-triples.mjs   # Extract KG triples from chunks
-│   └── gen-drag-data.mjs       # Generate DRAG training pairs
-├── colab_kd.ipynb              # Fine-tune SmolLM2 (direct SFT, T4 GPU)
+│   ├── gen-training-data.mjs   # Generate RAG-augmented training data (--rag flag)
+│   ├── gen-graph-triples.mjs   # Extract KG triples from chunks (v1 pipeline)
+│   └── gen-drag-data.mjs       # Generate teacher-distilled DRAG pairs (v1 pipeline)
+├── colab_sft.ipynb             # v3: LoRA SFT — current recommended notebook
+├── colab_kd.ipynb              # v1: Full SFT with teacher distillation (reference)
 ├── export_onnx.py              # Export checkpoint → ONNX fp32
-├── quantize_onnx.py            # Quantize ONNX → int8 for browser
+├── quantize_onnx.py            # Quantize ONNX → QInt8 (MatMul-only for WASM compat)
 └── specs/
     └── training-data.schema.json  # JSON schema for training data format
 ```
 
 ---
 
-## Step 1 — Prepare knowledge chunks
+## Quickstart (v3 LoRA pipeline)
 
-The data-gen scripts expect your knowledge as JSON files:
+### Step 1 — Prepare knowledge chunks
+
+Provide your knowledge as JSON files:
 
 - `public/data/knowledge_chunks.json` — array of `{ id, content, ... }` objects
 - `public/data/company_chunks.json` — `{ chunks: [...] }` object
 
-These are **not committed** (they may contain private information). Provide your own.
+These are **not committed** (may contain private information).
 
----
-
-## Step 2 — Generate training data
-
-### 2a — SFT pairs
+### Step 2 — Generate RAG-augmented training data
 
 ```bash
-GROQ_API_KEY=your_key node scripts/gen-training-data.mjs
-# Output: training_data.jsonl (~100 pairs)
+GROQ_API_KEY=your_key node scripts/gen-training-data.mjs --rag
+# Output: training_data_rag.jsonl (~300-400 examples)
 ```
 
-### 2b — KG triples
+The `--rag` flag generates `system+evidence+user+assistant` format.
+Evidence is truncated to 400 chars per example — must match your inference prompt.
 
-```bash
-GROQ_API_KEY=your_key node scripts/gen-graph-triples.mjs
-# Output: knowledge_triples.json
-```
-
-### 2c — DRAG pairs
-
-```bash
-GROQ_API_KEY=your_key node scripts/gen-drag-data.mjs
-# Output: training_data_drag.jsonl (~400 pairs)
-```
-
-Each output line matches the schema in `specs/training-data.schema.json`:
-
-```json
-{
-  "messages": [
-    { "role": "system", "content": "..evidence + triples.." },
-    { "role": "user",   "content": "Question?" },
-    { "role": "assistant", "content": "Grounded answer." }
-  ],
-  "meta": {
-    "sourceChunkIds": ["chunk-001"],
-    "groundingScore": 0.94,
-    "generatedBy": "llama-3.3-70b-versatile"
-  }
-}
-```
-
----
-
-## Step 3 — Fine-tune in Google Colab
+### Step 3 — Fine-tune with LoRA in Google Colab
 
 1. Open [Google Colab](https://colab.research.google.com/) → Runtime → T4 GPU
-2. Upload `colab_kd.ipynb`
-3. Upload both `training_data.jsonl` and `training_data_drag.jsonl`
+2. Upload `colab_sft.ipynb`
+3. Upload `training_data_rag.jsonl` to Google Drive at your configured path
 4. Run cells in order
 
-### Key training parameters
+**Key LoRA parameters:**
 
 | Parameter | Value | Why |
 |-----------|-------|-----|
-| `num_train_epochs` | 8 | Best checkpoint auto-selected (~epoch 6) |
-| `learning_rate` | 2e-5 | Standard SFT rate |
-| `completion_only_loss` | True | Only train on assistant completions |
-| `per_device_train_batch_size` | 16 | Effective batch 32 with grad accum 2 |
-| `eval_strategy` | epoch | Track overfitting |
-| `load_best_model_at_end` | True | Auto-select best checkpoint |
-| `metric_for_best_model` | eval_loss | Minimize validation loss |
+| `r` | 16 | Rank — controls adapter expressivity |
+| `lora_alpha` | 32 | Scale factor (alpha/r = 2 is standard) |
+| `target_modules` | q/k/v/o + gate/up/down proj | All linear layers in Llama attention + MLP |
+| `learning_rate` | 1e-4 | Higher than full SFT — adapters start from zero |
+| `max_length` | 2048 | Preserves base model's attention range |
+| `num_train_epochs` | 25 | `load_best_model_at_end` handles early stopping |
+| `trainable params` | ~3.5M / 360M (~1%) | Only adapters update; base weights frozen |
 
-### Expected training output
-
-```
-Epoch  Training Loss  Validation Loss
-1      1.197          0.993
-2      1.160          0.973
-3      1.069          0.962
-4      1.060          0.955
-5      1.155          0.952
-6      0.959          0.948  ← best
-7      1.017          0.950
-8      1.058          0.950
-```
-
----
-
-## Step 4 — Export to ONNX
+### Step 4 — Export and quantize
 
 ```bash
-pip install 'optimum[exporters]' onnx onnxruntime
+# Export (Python API — more reliable than CLI)
+from optimum.exporters.onnx import main_export
+main_export(model_name_or_path="./checkpoint", output="./onnx-export",
+            task="text-generation-with-past", opset=18, dtype="fp32")
 
-python export_onnx.py --checkpoint ./checkpoint --output ./onnx-export
+# Quantize (MatMul-only — required for ONNX Runtime Web WASM compatibility)
+python quantize_onnx.py
+```
+
+> **WASM compatibility note:** `quantize_dynamic` without `op_types_to_quantize=['MatMul']`
+> produces float16 DequantizeLinear outputs that crash ONNX Runtime Web with
+> `Type (tensor(float16)) does not match expected type (tensor(float))`.
+> Always restrict quantization to MatMul ops only.
+
+### Step 5 — Push to HuggingFace Hub
+
+```python
+from huggingface_hub import HfApi
+api = HfApi()
+api.upload_folder(folder_path="./onnx-export", repo_id="<your-hf-username>/smollm2-drag",
+                  repo_type="model")
 ```
 
 ---
 
-## Step 5 — Quantize to int8
+## Results Summary
 
-```bash
-python quantize_onnx.py --input ./onnx-export --output ./onnx-int8
-```
+| Run | Method | Training data | Best val loss | Hallucination |
+|-----|--------|--------------|---------------|---------------|
+| v1 | Full SFT | Bare Q&A (~100) | ~1.58 | High (fake employers) |
+| v2 | Full SFT | RAG-format (~339) | 0.604 | Medium (DPO overwritten) |
+| **v3** | **LoRA SFT** | **RAG-format (~339)** | **0.693** | **Low (DPO preserved)** |
 
-> **Note:** ONNX Runtime Web (WASM backend) rejects float16 scale tensors in
-> DequantizeLinear nodes. The quantize script includes a post-processing step
-> that casts these to float32.
-
----
-
-## Step 6 — Push to HuggingFace Hub
-
-```bash
-huggingface-cli login
-huggingface-cli upload <your-hf-username>/smollm2-drag ./onnx-int8
-```
-
----
-
-## Results
-
-| Metric | Base SmolLM2-360M | After DRAG Fine-tuning |
-|--------|------------------|------------------------|
-| Best eval loss | — | 0.948 |
-| Grounding (with evidence) | Low | High |
-| Hallucination rate | High | Low (with RAG context) |
-| Model size (ONNX int8) | 360 MB | 360 MB |
-| Inference target | Browser (WASM) | Browser (WASM) |
+The higher loss in v3 vs v2 is intentional — LoRA has less expressivity but preserves
+the base model's instruction-following and refusal behavior from DPO post-training.
 
 ---
 
 ## Reproducing with your own data
 
 1. Replace the JSON chunk files with your own knowledge base
-2. Update the name/persona references in the gen scripts if needed
-3. Run Steps 2–6 above
-4. Update `VITE_GEN_MODEL_2` in your app's `.env.local` to point at your HF model
+2. Update the persona references in the gen script prompts
+3. Run Steps 2–5 above
+4. Set `VITE_GEN_MODEL_2=<your-hf-username>/smollm2-drag` in your app's `.env.local`
 
 ---
 

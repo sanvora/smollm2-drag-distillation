@@ -311,7 +311,7 @@ async function callGroq(prompt, retries = MAX_RETRIES) {
         body: JSON.stringify({
           model: TEACHER_MODEL,
           messages: [{ role: 'user', content: prompt }],
-          temperature: 0.7,
+          temperature: 0.85,   // higher diversity → less repetitive training labels
           response_format: { type: "json_object" } // Force JSON
         })
       });
