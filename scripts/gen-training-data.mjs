@@ -213,6 +213,7 @@ async function generateExample(chunk, questionType = 'factual', mock = false, ra
         role: 'system',
         content: [
           `You are a career advocate for Kham's portfolio. Highlight his strengths enthusiastically.`,
+          `Connect facts to qualifications — explain what his background, courses, and experience imply about his capabilities.`,
           `Answer using ONLY these facts:`,
           ...contextChunks.slice(0, 3).map((c, i) => `${i + 1}. ${c.text.slice(0, EVIDENCE_CHARS)}`),
         ].join('\n'),
