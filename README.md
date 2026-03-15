@@ -1,38 +1,43 @@
-# SmolLM2-360M — SFT + DRAG Distillation Pipeline
+# SmolLM2-360M — DRAG Fine-Tuning Pipeline
 
 > A reproducible pipeline for fine-tuning a 360M-parameter language model on
-> structured knowledge using Supervised Fine-Tuning (SFT) followed by
-> **DRAG Distillation** (Document-Retrieval-Augmented Generation).
+> structured knowledge using **DRAG** (Distilled Retrieval-Augmented Generation).
 >
 > The resulting model runs entirely **in the browser** via
 > [Transformers.js](https://huggingface.co/docs/transformers.js) — no server required.
 
 ---
 
-## What is DRAG Distillation?
+## What is DRAG?
 
-Standard SFT trains a model to mimic answer-only pairs (question → answer).
-It doesn't teach the model *how* to read evidence — it just memorizes answers.
+**DRAG** (Distilled Retrieval-Augmented Generation) trains a small model to answer
+questions grounded in retrieved evidence — not from memorized facts.
 
-**DRAG** (Document-Retrieval-Augmented Generation) distillation fixes this by:
+Standard SFT trains on simple question → answer pairs. The model memorizes answers
+and hallucinates when asked anything outside its training set.
 
-1. Providing the student with **retrieved evidence chunks + knowledge-graph triples** at training time
-2. Having a **large teacher model** (LLaMA 3.3 70B via Groq) generate grounded answers *from that evidence*
-3. Training the student to replicate the teacher's reasoning process, not just its outputs
+DRAG fixes this by:
 
-The result is a model that generalizes: it can answer questions it hasn't seen before,
-as long as it has the right evidence at inference time.
+1. Using a **large teacher model** (Llama 3.3 70B via Groq) to generate high-quality,
+   grounded answers from retrieved evidence chunks
+2. Training the student on the **full context** — system prompt with evidence,
+   user question, and teacher-generated answer
+3. Using **completion-only loss** so the model learns to *read and answer from evidence*,
+   not memorize the prompt
+
+The result is a model that generalizes: given the right evidence at inference time,
+it can answer questions it has never seen before.
 
 ### SFT vs DRAG — key differences
 
 | | SFT | DRAG |
 |---|---|---|
-| Training signal | Answer pairs only | Teacher reasoning over evidence |
-| Input format | `user: Q\nassistant: A` | `system: [evidence+triples]\nuser: Q\nassistant: A` |
-| Generalisation | Memorizes Q→A | Learns to read + reason |
-| Hallucination risk | Medium (memorized facts can drift) | Low (grounded in retrieved context) |
-| Data required | ~100 pairs | ~400 pairs (higher quality via teacher) |
-| Inference format | Matches training format | Matches training format exactly ✓ |
+| Training signal | Answer pairs only | Teacher answer grounded in evidence |
+| Input format | `user: Q` → `assistant: A` | `system: [evidence]` → `user: Q` → `assistant: A` |
+| Loss masking | Full sequence | Completion-only (prompt tokens masked) |
+| Generalisation | Memorizes Q→A | Learns to extract + reason from context |
+| Hallucination risk | Medium–High | Low (grounded in retrieved context) |
+| Data required | ~100 pairs | ~400+ pairs (higher quality via teacher) |
 
 ---
 
@@ -47,15 +52,14 @@ flowchart TD
     D --> F[gen-drag-data.mjs\nDRAG pairs: evidence + triples + teacher answer]
     A --> F
     F --> G[training_data_drag.jsonl\n~400 DRAG pairs]
-    E --> H[colab_sft.ipynb\nSFT on T4 GPU]
-    G --> I[colab_kd.ipynb\nGKD on T4 GPU]
-    H --> J[SFT checkpoint]
-    J --> I
-    I --> K[DRAG checkpoint]
-    K --> L[export_onnx.py\noptimum-cli → ONNX fp32]
-    L --> M[quantize_onnx.py\nONNXRuntime → int8]
-    M --> N[HuggingFace Hub\nONNX int8 model]
-    N --> O[Browser inference\nTransformers.js]
+    E --> H{Combine datasets}
+    G --> H
+    H --> I[colab_kd.ipynb\nDirect SFT on T4 GPU\n8 epochs · completion-only loss]
+    I --> J[Best checkpoint\nauto-selected by eval loss]
+    J --> K[export_onnx.py\nONNX fp32 export]
+    K --> L[quantize_onnx.py\nONNXRuntime → int8]
+    L --> M[HuggingFace Hub\nONNX int8 model]
+    M --> N[Browser inference\nTransformers.js + ONNX Runtime Web]
 ```
 
 ---
@@ -64,13 +68,12 @@ flowchart TD
 
 ```
 ├── scripts/
-│   ├── gen-training-data.mjs   # Step 1a: generate SFT Q&A pairs (teacher LLM)
-│   ├── gen-graph-triples.mjs   # Step 1b: extract KG triples from chunks
-│   └── gen-drag-data.mjs       # Step 2: generate DRAG training pairs
-├── colab_sft.ipynb             # Step 3: SFT in Google Colab (T4 GPU)
-├── colab_kd.ipynb              # Step 4: GKD/DRAG in Google Colab (T4 GPU)
-├── export_onnx.py              # Step 5: export checkpoint → ONNX fp32
-├── quantize_onnx.py            # Step 6: quantize ONNX → int8
+│   ├── gen-training-data.mjs   # Generate SFT Q&A pairs (teacher LLM)
+│   ├── gen-graph-triples.mjs   # Extract KG triples from chunks
+│   └── gen-drag-data.mjs       # Generate DRAG training pairs
+├── colab_kd.ipynb              # Fine-tune SmolLM2 (direct SFT, T4 GPU)
+├── export_onnx.py              # Export checkpoint → ONNX fp32
+├── quantize_onnx.py            # Quantize ONNX → int8 for browser
 └── specs/
     └── training-data.schema.json  # JSON schema for training data format
 ```
@@ -97,7 +100,7 @@ GROQ_API_KEY=your_key node scripts/gen-training-data.mjs
 # Output: training_data.jsonl (~100 pairs)
 ```
 
-### 2b — KG triples (required for DRAG)
+### 2b — KG triples
 
 ```bash
 GROQ_API_KEY=your_key node scripts/gen-graph-triples.mjs
@@ -130,27 +133,42 @@ Each output line matches the schema in `specs/training-data.schema.json`:
 
 ---
 
-## Step 3 — SFT in Google Colab
+## Step 3 — Fine-tune in Google Colab
 
 1. Open [Google Colab](https://colab.research.google.com/) → Runtime → T4 GPU
-2. Upload `colab_sft.ipynb`
-3. Run cells in order — upload `training_data.jsonl` when prompted
-4. Download `checkpoint.zip` after training (~2–4 hours)
+2. Upload `colab_kd.ipynb`
+3. Upload both `training_data.jsonl` and `training_data_drag.jsonl`
+4. Run cells in order
+
+### Key training parameters
+
+| Parameter | Value | Why |
+|-----------|-------|-----|
+| `num_train_epochs` | 8 | Best checkpoint auto-selected (~epoch 6) |
+| `learning_rate` | 2e-5 | Standard SFT rate |
+| `completion_only_loss` | True | Only train on assistant completions |
+| `per_device_train_batch_size` | 16 | Effective batch 32 with grad accum 2 |
+| `eval_strategy` | epoch | Track overfitting |
+| `load_best_model_at_end` | True | Auto-select best checkpoint |
+| `metric_for_best_model` | eval_loss | Minimize validation loss |
+
+### Expected training output
+
+```
+Epoch  Training Loss  Validation Loss
+1      1.197          0.993
+2      1.160          0.973
+3      1.069          0.962
+4      1.060          0.955
+5      1.155          0.952
+6      0.959          0.948  ← best
+7      1.017          0.950
+8      1.058          0.950
+```
 
 ---
 
-## Step 4 — DRAG distillation in Google Colab
-
-1. Upload `colab_kd.ipynb` to Colab (T4 GPU)
-2. Upload:
-   - `training_data_drag.jsonl`
-   - The SFT `checkpoint.zip` from Step 3
-3. Run cells in order
-4. Download the DRAG `checkpoint.zip`
-
----
-
-## Step 5 — Export to ONNX
+## Step 4 — Export to ONNX
 
 ```bash
 pip install 'optimum[exporters]' onnx onnxruntime
@@ -160,15 +178,19 @@ python export_onnx.py --checkpoint ./checkpoint --output ./onnx-export
 
 ---
 
-## Step 6 — Quantize to int8
+## Step 5 — Quantize to int8
 
 ```bash
 python quantize_onnx.py --input ./onnx-export --output ./onnx-int8
 ```
 
+> **Note:** ONNX Runtime Web (WASM backend) rejects float16 scale tensors in
+> DequantizeLinear nodes. The quantize script includes a post-processing step
+> that casts these to float32.
+
 ---
 
-## Step 7 — Push to HuggingFace Hub
+## Step 6 — Push to HuggingFace Hub
 
 ```bash
 huggingface-cli login
@@ -179,12 +201,13 @@ huggingface-cli upload <your-hf-username>/smollm2-drag ./onnx-int8
 
 ## Results
 
-| Metric | Base SmolLM2-360M | After SFT | After DRAG |
-|--------|------------------|-----------|------------|
-| Grounding score (internal eval) | — | ~0.80 | ~0.92 |
-| Hallucination rate (manual audit) | high | medium | low |
-| Model size (ONNX int8) | 360MB | 360MB | 360MB |
-| Inference target | Browser (Transformers.js) | Browser | Browser |
+| Metric | Base SmolLM2-360M | After DRAG Fine-tuning |
+|--------|------------------|------------------------|
+| Best eval loss | — | 0.948 |
+| Grounding (with evidence) | Low | High |
+| Hallucination rate | High | Low (with RAG context) |
+| Model size (ONNX int8) | 360 MB | 360 MB |
+| Inference target | Browser (WASM) | Browser (WASM) |
 
 ---
 
@@ -192,7 +215,7 @@ huggingface-cli upload <your-hf-username>/smollm2-drag ./onnx-int8
 
 1. Replace the JSON chunk files with your own knowledge base
 2. Update the name/persona references in the gen scripts if needed
-3. Run Steps 2–7 above
+3. Run Steps 2–6 above
 4. Update `VITE_GEN_MODEL_2` in your app's `.env.local` to point at your HF model
 
 ---

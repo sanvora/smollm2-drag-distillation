@@ -15,6 +15,7 @@ const TEACHER_MODEL = 'llama-3.3-70b-versatile'; // High quality teacher model
 const GROUNDING_THRESHOLD = 0.85;
 const MAX_RETRIES = 3;
 const PAIRS_PER_CHUNK = 10; // Generate N diverse Q&A pairs per chunk
+const EVIDENCE_CHARS = 400;  // Max chars of source chunk text to include in training system prompt
 
 const QUESTION_TYPES = [
   'factual',       // What did Kham do / what is X?
@@ -32,18 +33,23 @@ const QUESTION_TYPES = [
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
 const OUTPUT_DIR = path.join(ROOT, 'scripts', 'finetune');
-const OUTPUT_FILE = path.join(OUTPUT_DIR, 'training_data.jsonl');
+
+// CLI Arguments
+const args = process.argv.slice(2);
+const isDryRun = args.includes('--dry-run');
+const isResume = args.includes('--resume');
+// --rag: include a compact system prompt with source evidence in each training example.
+// This teaches the model to condition on retrieved context, matching inference-time behavior.
+const isRag = args.includes('--rag');
+
+// --rag writes to training_data_rag.jsonl to preserve the bare training_data.jsonl
+const OUTPUT_FILE = path.join(OUTPUT_DIR, isRag ? 'training_data_rag.jsonl' : 'training_data.jsonl');
 
 // Chunk sources - expand as needed
 const CHUNK_FILES = [
   'public/data/knowledge_chunks.json',
   'public/data/company_chunks.json'
 ];
-
-// CLI Arguments
-const args = process.argv.slice(2);
-const isDryRun = args.includes('--dry-run');
-const isResume = args.includes('--resume');
 
 // Colors for console
 const colors = {
@@ -78,10 +84,14 @@ async function main() {
     if (fs.existsSync(fullPath)) {
       try {
         const fileContent = fs.readFileSync(fullPath, 'utf-8');
-        const chunks = JSON.parse(fileContent);
-        if (Array.isArray(chunks)) {
-          allChunks = allChunks.concat(chunks);
-          log(`Loaded ${chunks.length} chunks from ${relativePath}`, colors.green);
+        const parsed = JSON.parse(fileContent);
+        // knowledge_chunks.json is a flat array; company_chunks.json is { companyIndex, jobIndex, chunks: [...] }
+        const chunkList = Array.isArray(parsed) ? parsed : (parsed.chunks ?? []);
+        if (chunkList.length > 0) {
+          allChunks = allChunks.concat(chunkList);
+          log(`Loaded ${chunkList.length} chunks from ${relativePath}`, colors.green);
+        } else {
+          log(`Warning: No chunks found in ${relativePath}`, colors.yellow);
         }
       } catch (err) {
         log(`Warning: Failed to parse ${relativePath}: ${err.message}`, colors.yellow);
@@ -120,9 +130,10 @@ async function main() {
 
   if (isDryRun) {
     log(`\n--- DRY RUN MODE (Printing ${PAIRS_PER_CHUNK} mock examples from first chunk) ---\n`, colors.yellow);
+    log(`RAG mode: ${isRag ? 'ON (system prompt + evidence)' : 'OFF (bare user/assistant)'}`, colors.yellow);
     const sampleChunk = chunksToProcess[0];
     for (let i = 0; i < Math.min(PAIRS_PER_CHUNK, 3); i++) {
-      const example = await generateExample(sampleChunk, QUESTION_TYPES[i], true);
+      const example = await generateExample(sampleChunk, QUESTION_TYPES[i], true, isRag);
       if (example) {
         console.log(JSON.stringify(example, null, 2));
         console.log('---');
@@ -131,6 +142,8 @@ async function main() {
     log(`\nDry run complete. No files written.`, colors.green);
     return;
   }
+
+  log(`RAG mode: ${isRag ? 'ON — adding compact system prompt + evidence to each example' : 'OFF — bare user/assistant pairs'}`, colors.cyan);
 
   // Main processing loop
   let successCount = 0;
@@ -146,7 +159,7 @@ async function main() {
       process.stdout.write(`  pair ${p + 1}/${PAIRS_PER_CHUNK} [${qType}]... `);
 
       try {
-        const result = await generateExample(chunk, qType, false);
+        const result = await generateExample(chunk, qType, false, isRag);
 
         if (!result) {
           process.stdout.write(`${colors.red}Failed${colors.reset}\n`);
@@ -185,18 +198,33 @@ async function main() {
 }
 
 // Generate a single Q&A pair of a given question type
-async function generateExample(chunk, questionType = 'factual', mock = false) {
+async function generateExample(chunk, questionType = 'factual', mock = false, ragMode = false) {
+  // Build system message for RAG-aware training (matches inference compact prompt format)
+  const systemMessage = ragMode
+    ? {
+        role: 'system',
+        content: [
+          `You are a helpful assistant for Kham's portfolio. Be concise and accurate.`,
+          `Answer using ONLY these facts:`,
+          `1. ${chunk.text.slice(0, EVIDENCE_CHARS)}`,
+        ].join('\n'),
+      }
+    : null;
+
   if (mock) {
+    const messages = [
+      ...(systemMessage ? [systemMessage] : []),
+      { role: 'user', content: `[${questionType}] What is interesting about ${chunk.id}?` },
+      { role: 'assistant', content: `This chunk discusses... ${chunk.text.substring(0, 20)}...` }
+    ];
     return {
-      messages: [
-        { role: 'user', content: `[${questionType}] What is interesting about ${chunk.id}?` },
-        { role: 'assistant', content: `This chunk discusses... ${chunk.text.substring(0, 20)}...` }
-      ],
+      messages,
       meta: {
         sourceChunkIds: [chunk.id],
         groundingScore: 0.95,
         generatedBy: 'mock-teacher',
-        questionType
+        questionType,
+        ragMode,
       }
     };
   }
@@ -249,16 +277,20 @@ Response Format (JSON only, no markdown):
 
     if (!parsed || !parsed.question || !parsed.answer) return null;
 
+    const messages = [
+      ...(systemMessage ? [systemMessage] : []),
+      { role: 'user', content: parsed.question },
+      { role: 'assistant', content: parsed.answer }
+    ];
+
     return {
-      messages: [
-        { role: 'user', content: parsed.question },
-        { role: 'assistant', content: parsed.answer }
-      ],
+      messages,
       meta: {
         sourceChunkIds: [chunk.id],
         groundingScore: parsed.grounding_score || 0,
         generatedBy: TEACHER_MODEL,
-        questionType
+        questionType,
+        ragMode,
       }
     };
   } catch (error) {
