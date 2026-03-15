@@ -12,7 +12,7 @@ import { fileURLToPath } from 'url';
 // Configuration
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const TEACHER_MODEL = 'llama-3.3-70b-versatile'; // High quality teacher model
-const GROUNDING_THRESHOLD = 0.85;
+const GROUNDING_THRESHOLD = 0.90;
 const MAX_RETRIES = 3;
 const PAIRS_PER_CHUNK = 10; // Generate N diverse Q&A pairs per chunk
 const EVIDENCE_CHARS = 400;  // Max chars of source chunk text to include in training system prompt
@@ -265,8 +265,8 @@ ${contextText}
 Task:
 1. Question type: ${questionType.toUpperCase()} — ${instruction}
 2. Write a question that can be answered using the context above. Prefer questions that benefit from multiple facts.
-3. Write a promotional answer that highlights Kham's strengths and unique value. Be warm, specific, and enthusiastic — like a trusted colleague who admires his work and wants to advocate for him. Lead with his strengths. Use concrete details from the context. Reference multiple facts when relevant. Do NOT invent facts outside the context.
-4. Rate how well the answer is grounded in the context (0.0–1.0).
+3. Write a promotional answer that highlights Kham's strengths. Be warm and enthusiastic. Use ONLY specific names, technologies, tools, and facts that appear VERBATIM in the context above. Do NOT add any technology names, algorithms, tools, companies, or credentials that are not explicitly stated in the context — even if they seem plausible. Connect facts to qualifications by explaining what the stated facts imply, but do not invent supporting details.
+4. Rate how well the answer is grounded in the context (0.0–1.0). Score 1.0 only if every specific claim is traceable to the context.
 
 Response Format (JSON only, no markdown):
 {
