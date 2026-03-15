@@ -154,12 +154,19 @@ async function main() {
     const chunk = chunksToProcess[i];
     log(`\nChunk ${i + 1}/${chunksToProcess.length} (${chunk.id})`, colors.cyan);
 
+    // Gather up to 2 neighboring chunks for multi-chunk evidence context
+    const neighbors = [
+      i > 0 ? chunksToProcess[i - 1] : null,
+      i < chunksToProcess.length - 1 ? chunksToProcess[i + 1] : null,
+    ].filter(Boolean).slice(0, 2);
+    const contextChunks = [chunk, ...neighbors];
+
     for (let p = 0; p < PAIRS_PER_CHUNK; p++) {
       const qType = QUESTION_TYPES[p % QUESTION_TYPES.length];
       process.stdout.write(`  pair ${p + 1}/${PAIRS_PER_CHUNK} [${qType}]... `);
 
       try {
-        const result = await generateExample(chunk, qType, false, isRag);
+        const result = await generateExample(chunk, qType, false, isRag, contextChunks);
 
         if (!result) {
           process.stdout.write(`${colors.red}Failed${colors.reset}\n`);
@@ -198,7 +205,8 @@ async function main() {
 }
 
 // Generate a single Q&A pair of a given question type
-async function generateExample(chunk, questionType = 'factual', mock = false, ragMode = false) {
+// contextChunks: array of chunks for evidence (primary chunk first, then neighbors)
+async function generateExample(chunk, questionType = 'factual', mock = false, ragMode = false, contextChunks = [chunk]) {
     // Build system message for RAG-aware training (matches inference compact prompt format)
   const systemMessage = ragMode
     ? {
@@ -206,7 +214,7 @@ async function generateExample(chunk, questionType = 'factual', mock = false, ra
         content: [
           `You are a career advocate for Kham's portfolio. Highlight his strengths enthusiastically.`,
           `Answer using ONLY these facts:`,
-          `1. ${chunk.text.slice(0, EVIDENCE_CHARS)}`,
+          ...contextChunks.slice(0, 3).map((c, i) => `${i + 1}. ${c.text.slice(0, EVIDENCE_CHARS)}`),
         ].join('\n'),
       }
     : null;
@@ -244,17 +252,19 @@ async function generateExample(chunk, questionType = 'factual', mock = false, ra
 
   const instruction = typeInstructions[questionType] || typeInstructions.factual;
 
+  const contextText = contextChunks.slice(0, 3).map((c, i) => `[Fact ${i + 1}]\n${c.text}`).join('\n\n');
+
   const prompt = `You are a career advocate creating high-quality training data for Kham's personal AI portfolio assistant.
 
-Context about Kham:
+Context about Kham (up to 3 related facts):
 """
-${chunk.text}
+${contextText}
 """
 
 Task:
 1. Question type: ${questionType.toUpperCase()} — ${instruction}
-2. Write a question that can be answered using ONLY the context above.
-3. Write a promotional answer that highlights Kham's strengths and unique value. Be warm, specific, and enthusiastic — like a trusted colleague who admires his work and wants to advocate for him. Lead with his strengths. Use concrete details from the context. Do NOT invent facts outside the context.
+2. Write a question that can be answered using the context above. Prefer questions that benefit from multiple facts.
+3. Write a promotional answer that highlights Kham's strengths and unique value. Be warm, specific, and enthusiastic — like a trusted colleague who admires his work and wants to advocate for him. Lead with his strengths. Use concrete details from the context. Reference multiple facts when relevant. Do NOT invent facts outside the context.
 4. Rate how well the answer is grounded in the context (0.0–1.0).
 
 Response Format (JSON only, no markdown):
