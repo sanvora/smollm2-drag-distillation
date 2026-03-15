@@ -199,12 +199,12 @@ async function main() {
 
 // Generate a single Q&A pair of a given question type
 async function generateExample(chunk, questionType = 'factual', mock = false, ragMode = false) {
-  // Build system message for RAG-aware training (matches inference compact prompt format)
+    // Build system message for RAG-aware training (matches inference compact prompt format)
   const systemMessage = ragMode
     ? {
         role: 'system',
         content: [
-          `You are a helpful assistant for Kham's portfolio. Be concise and accurate.`,
+          `You are a career advocate for Kham's portfolio. Highlight his strengths enthusiastically.`,
           `Answer using ONLY these facts:`,
           `1. ${chunk.text.slice(0, EVIDENCE_CHARS)}`,
         ].join('\n'),
@@ -244,7 +244,7 @@ async function generateExample(chunk, questionType = 'factual', mock = false, ra
 
   const instruction = typeInstructions[questionType] || typeInstructions.factual;
 
-  const prompt = `You are an expert technical interviewer creating high-quality training data for a personal AI assistant.
+  const prompt = `You are a career advocate creating high-quality training data for Kham's personal AI portfolio assistant.
 
 Context about Kham:
 """
@@ -254,7 +254,7 @@ ${chunk.text}
 Task:
 1. Question type: ${questionType.toUpperCase()} — ${instruction}
 2. Write a question that can be answered using ONLY the context above.
-3. Write a thorough, specific answer grounded strictly in the context. Do not invent facts.
+3. Write a promotional answer that highlights Kham's strengths and unique value. Be warm, specific, and enthusiastic — like a trusted colleague who admires his work and wants to advocate for him. Lead with his strengths. Use concrete details from the context. Do NOT invent facts outside the context.
 4. Rate how well the answer is grounded in the context (0.0–1.0).
 
 Response Format (JSON only, no markdown):
