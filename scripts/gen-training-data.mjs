@@ -15,7 +15,7 @@ const TEACHER_MODEL = 'llama-3.3-70b-versatile'; // High quality teacher model
 const GROUNDING_THRESHOLD = 0.90;
 const MAX_RETRIES = 3;
 const PAIRS_PER_CHUNK = 10; // Generate N diverse Q&A pairs per chunk
-const EVIDENCE_CHARS = 400;  // Max chars of source chunk text to include in training system prompt
+const EVIDENCE_CHARS = 600;  // Max chars of source chunk text to include in training system prompt
 
 const QUESTION_TYPES = [
   'factual',       // What did Kham do / what is X?
@@ -207,17 +207,19 @@ async function main() {
 // Generate a single Q&A pair of a given question type
 // contextChunks: array of chunks for evidence (primary chunk first, then neighbors)
 async function generateExample(chunk, questionType = 'factual', mock = false, ragMode = false, contextChunks = [chunk]) {
-    // Build system message for RAG-aware training (matches inference compact prompt format)
+  // Build system message for RAG-aware training (matches inference compact prompt format)
   const systemMessage = ragMode
     ? {
-        role: 'system',
-        content: [
-          `You are a career advocate for Kham's portfolio. Highlight his strengths enthusiastically.`,
-          `Connect facts to qualifications — explain what his background, courses, and experience imply about his capabilities.`,
-          `Answer using ONLY these facts:`,
-          ...contextChunks.slice(0, 3).map((c, i) => `${i + 1}. ${c.text.slice(0, EVIDENCE_CHARS)}`),
-        ].join('\n'),
-      }
+      role: 'system',
+      content: [
+        `You are a career advocate for Kham's portfolio.`,
+        `Give detailed, evidence-rich answers of 4–8 sentences. Cite specific projects, metrics, and technologies from the facts below.`,
+        `Explain WHY each fact matters — connect background to capabilities, and results to qualifications.`,
+        `Sound like a knowledgeable colleague who genuinely admires Kham's work, not a resume summary.`,
+        `Answer using ONLY these facts:`,
+        ...contextChunks.slice(0, 3).map((c, i) => `${i + 1}. ${c.text.slice(0, EVIDENCE_CHARS)}`),
+      ].join('\n'),
+    }
     : null;
 
   if (mock) {
@@ -239,16 +241,16 @@ async function generateExample(chunk, questionType = 'factual', mock = false, ra
   }
 
   const typeInstructions = {
-    factual:    'Ask a specific factual question about what is described (e.g., "What did Kham do at X?" or "What is X?").',
+    factual: 'Ask a specific factual question about what is described (e.g., "What did Kham do at X?" or "What is X?").',
     behavioral: 'Ask a behavioral interview question starting with "Tell me about a time..." or "Describe a situation where..."',
-    technical:  'Ask a technical deep-dive question about the methodology, algorithm, or engineering approach described.',
-    metrics:    'Ask about measurable outcomes, numbers, percentages, or quantified impact described in the context.',
+    technical: 'Ask a technical deep-dive question about the methodology, algorithm, or engineering approach described.',
+    metrics: 'Ask about measurable outcomes, numbers, percentages, or quantified impact described in the context.',
     motivation: 'Ask why a particular approach, technology, or decision was made.',
     comparison: 'Ask how one approach, tool, or result compares to another or to industry standards.',
-    depth:      'Ask for a more detailed explanation of a specific concept, project, or technique mentioned.',
-    scenario:   'Pose a realistic work scenario and ask how Kham would approach it based on his experience.',
-    skills:     'Ask what specific technical skills, tools, or domain knowledge were required or demonstrated.',
-    impact:     'Ask about the business value, strategic importance, or real-world impact of the work described.',
+    depth: 'Ask for a more detailed explanation of a specific concept, project, or technique mentioned.',
+    scenario: 'Pose a realistic work scenario and ask how Kham would approach it based on his experience.',
+    skills: 'Ask what specific technical skills, tools, or domain knowledge were required or demonstrated.',
+    impact: 'Ask about the business value, strategic importance, or real-world impact of the work described.',
   };
 
   const instruction = typeInstructions[questionType] || typeInstructions.factual;
@@ -265,7 +267,7 @@ ${contextText}
 Task:
 1. Question type: ${questionType.toUpperCase()} — ${instruction}
 2. Write a question that can be answered using the context above. Prefer questions that benefit from multiple facts.
-3. Write a promotional answer that highlights Kham's strengths. Be warm and enthusiastic. Use ONLY specific names, technologies, tools, and facts that appear VERBATIM in the context above. Do NOT add any technology names, algorithms, tools, companies, or credentials that are not explicitly stated in the context — even if they seem plausible. Connect facts to qualifications by explaining what the stated facts imply, but do not invent supporting details.
+3. Write a detailed, evidence-rich answer of 4–8 sentences that highlights Kham's strengths. Be warm and enthusiastic. Always cite specific projects, metrics, technologies, or results from the context. Explain what the facts IMPLY about Kham's capabilities — why they matter, not just what they are. Sound like a knowledgeable colleague who genuinely admires Kham's work, not a resume summary. Use ONLY specific names, technologies, tools, and facts that appear VERBATIM in the context above. Do NOT add any technology names, algorithms, tools, companies, or credentials that are not explicitly stated in the context — even if they seem plausible.
 4. Rate how well the answer is grounded in the context (0.0–1.0). Score 1.0 only if every specific claim is traceable to the context.
 
 Response Format (JSON only, no markdown):

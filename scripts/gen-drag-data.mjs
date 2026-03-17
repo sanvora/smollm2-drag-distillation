@@ -36,20 +36,20 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
-const GROQ_API_URL   = 'https://api.groq.com/openai/v1/chat/completions';
-const TEACHER_MODEL  = 'llama-3.3-70b-versatile';
-const OUTPUT_DIR     = join(ROOT, 'scripts', 'finetune');
-const OUTPUT_FILE    = join(OUTPUT_DIR, 'training_data_drag.jsonl');
-const TRIPLES_FILE   = join(OUTPUT_DIR, 'knowledge_triples.json');
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const TEACHER_MODEL = 'llama-3.3-70b-versatile';
+const OUTPUT_DIR = join(ROOT, 'scripts', 'finetune');
+const OUTPUT_FILE = join(OUTPUT_DIR, 'training_data_drag.jsonl');
+const TRIPLES_FILE = join(OUTPUT_DIR, 'knowledge_triples.json');
 const GROUNDING_THRESHOLD = 0.85;
-const PAIRS_PER_CHUNK     = 16;  // 25 chunks × 16 = 400 examples
-const TOP_K_EVIDENCE      = 3;   // How many chunks to include as evidence context
-const TOP_K_TRIPLES       = 10;  // Max triples to include in system prompt
-const MAX_RETRIES         = 3;
+const PAIRS_PER_CHUNK = 16;  // 25 chunks × 16 = 400 examples
+const TOP_K_EVIDENCE = 3;   // How many chunks to include as evidence context
+const TOP_K_TRIPLES = 10;  // Max triples to include in system prompt
+const MAX_RETRIES = 3;
 
-const args      = process.argv.slice(2);
-const isDryRun  = args.includes('--dry-run');
-const isResume  = args.includes('--resume');
+const args = process.argv.slice(2);
+const isDryRun = args.includes('--dry-run');
+const isResume = args.includes('--resume');
 
 const colors = {
   reset: '\x1b[0m', green: '\x1b[32m', yellow: '\x1b[33m',
@@ -137,7 +137,7 @@ const QUESTION_TYPES = [
   'skills',
   'impact',
   'multi_chunk',   // Synthesizes across multiple chunks
-  'concise',       // Explicitly asks for a brief answer
+  'elaboration',   // Provide a rich, detailed explanation with evidence
   'recruiter',     // Recruiter / hiring manager framing
   'fit',           // Job fit / candidate evaluation
   'gap',           // What Kham might lack or how he'd grow
@@ -145,22 +145,22 @@ const QUESTION_TYPES = [
 ];
 
 const TYPE_INSTRUCTIONS = {
-  factual:     'Ask a specific factual question answerable from the evidence (e.g., "What did Kham do at X?" or "What technology did Kham use for Y?").',
-  behavioral:  'Write a behavioral interview question starting with "Tell me about a time..." or "Describe a situation where..."',
-  technical:   'Ask a technical deep-dive question about the methodology, algorithm, architecture, or engineering approach in the evidence.',
-  metrics:     'Ask about measurable outcomes, numbers, percentages, timelines, or quantified impact mentioned in the evidence.',
-  motivation:  'Ask why a particular approach, technology, or decision was made — probe reasoning and judgment.',
-  comparison:  'Ask how one approach, tool, result, or skill in the evidence compares to another or to industry standards.',
-  depth:       'Ask for a detailed explanation of a specific concept, project, or technique mentioned in the evidence.',
-  scenario:    'Pose a realistic work scenario and ask how Kham would approach it based on his demonstrated experience.',
-  skills:      'Ask what specific technical skills, tools, languages, or domain knowledge were required or demonstrated.',
-  impact:      'Ask about the business value, strategic importance, or measurable real-world impact of the work described.',
+  factual: 'Ask a specific factual question answerable from the evidence (e.g., "What did Kham do at X?" or "What technology did Kham use for Y?").',
+  behavioral: 'Write a behavioral interview question starting with "Tell me about a time..." or "Describe a situation where..."',
+  technical: 'Ask a technical deep-dive question about the methodology, algorithm, architecture, or engineering approach in the evidence.',
+  metrics: 'Ask about measurable outcomes, numbers, percentages, timelines, or quantified impact mentioned in the evidence.',
+  motivation: 'Ask why a particular approach, technology, or decision was made — probe reasoning and judgment.',
+  comparison: 'Ask how one approach, tool, result, or skill in the evidence compares to another or to industry standards.',
+  depth: 'Ask for a detailed explanation of a specific concept, project, or technique mentioned in the evidence.',
+  scenario: 'Pose a realistic work scenario and ask how Kham would approach it based on his demonstrated experience.',
+  skills: 'Ask what specific technical skills, tools, languages, or domain knowledge were required or demonstrated.',
+  impact: 'Ask about the business value, strategic importance, or measurable real-world impact of the work described.',
   multi_chunk: 'Ask a question that requires synthesizing information across MULTIPLE evidence sections (e.g., linking skills to a specific project outcome).',
-  concise:     'Ask a question that can be answered in 1–2 sentences. Prefix the question with "In brief:" or "Quick answer:".',
-  recruiter:   'Frame the question from a recruiter\'s perspective evaluating Kham for a senior role (e.g., "Would Kham be a good fit for a team that needs X?").',
-  fit:         'Ask how Kham\'s background fits a specific context, role, or requirement implied by the evidence.',
-  gap:         'Ask a thoughtful question about where Kham might grow further or what adjacent skills he could develop.',
-  followup:    'Write a realistic follow-up question someone might ask after an initial answer about the topic in the evidence.',
+  elaboration: 'Ask for a thorough, detailed explanation of a project or accomplishment. Expect a rich, evidence-backed answer with specific names, metrics, and technologies.',
+  recruiter: 'Frame the question from a recruiter\'s perspective evaluating Kham for a senior role (e.g., "Would Kham be a good fit for a team that needs X?").',
+  fit: 'Ask how Kham\'s background fits a specific context, role, or requirement implied by the evidence.',
+  gap: 'Ask a thoughtful question about where Kham might grow further or what adjacent skills he could develop.',
+  followup: 'Write a realistic follow-up question someone might ask after an initial answer about the topic in the evidence.',
 };
 
 // ── Generate one DRAG-format training example ────────────────────────────────
@@ -176,7 +176,7 @@ async function generateExample(primaryChunk, relatedChunks, allTriples, question
     return {
       messages: [
         { role: 'system', content: systemContent.substring(0, 200) + '...' },
-        { role: 'user',   content: `[MOCK ${questionType}] What did Kham accomplish?` },
+        { role: 'user', content: `[MOCK ${questionType}] What did Kham accomplish?` },
         { role: 'assistant', content: 'Mock answer based on context.' },
       ],
       meta: { sourceChunkIds: chunkIds, groundingScore: 0.95, generatedBy: 'mock', questionType },
@@ -192,7 +192,7 @@ Task:
 1. Write a "${questionType.toUpperCase()}" question: ${instruction}
 2. The question must be answerable using ONLY the system context above.
 3. Write a thorough, specific answer grounded strictly in the context. Do not invent facts.
-4. The answer should be the length appropriate to the question — concise questions get short answers, technical questions can be 2–4 sentences.
+4. Write a detailed, substantive answer of 4–8 sentences. Always cite specific evidence from the context (names, projects, metrics, technologies). Explain WHY the facts matter — connect them to qualifications, impact, and capabilities. The answer should sound like a knowledgeable colleague enthusiastically describing Kham's work, not a bullet-point summary.
 5. Rate how well the answer is grounded (0.0–1.0).
 
 Respond with JSON only (no markdown):
@@ -211,7 +211,7 @@ Respond with JSON only (no markdown):
   return {
     messages: [
       { role: 'system', content: systemContent },
-      { role: 'user',   content: parsed.question },
+      { role: 'user', content: parsed.question },
       { role: 'assistant', content: parsed.answer },
     ],
     meta: {
@@ -269,7 +269,7 @@ async function main() {
 
   mkdirSync(OUTPUT_DIR, { recursive: true });
 
-  const allChunks  = loadAllChunks();
+  const allChunks = loadAllChunks();
   const allTriples = existsSync(TRIPLES_FILE)
     ? JSON.parse(readFileSync(TRIPLES_FILE, 'utf8'))
     : {};
